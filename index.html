@@ -217,7 +217,7 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
   <i class="screw tl"></i><i class="screw tr"></i><i class="screw bl"></i><i class="screw br"></i>
   <div class="jack in"><span>IN</span></div><div class="jack out"><span>OUT</span></div><div class="dc"></div>
   <div class="head">
-    <div class="brand">PLOOPER<small>SYNC LOOP STATION · 8 TRACK · v6.6</small></div>
+    <div class="brand">PLOOPER<small>SYNC LOOP STATION · 8 TRACK · v6.7</small></div>
     <div class="master"><div class="knob big" id="masterKnob" tabindex="0" role="slider" aria-label="Master volume"><i></i></div>OUTPUT</div>
   </div>
 
@@ -325,7 +325,7 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
 
   let ctx,micSrc,micGain,proc,analyser,monGain,master,recBus,instMix,IR,micOk=false,micMuted=false; const bus={};
   let sr=48000,monitoring=false,masterVol=.85;
-  const tracks=[0,1,2,3,4,5,6,7].map(i=>({i,color:TCOL[i],len:0,t0:0,layers:[],state:'empty',muted:false,rec:null,shift:0,open:true}));
+  const tracks=[0,1,2,3,4,5,6,7].map(i=>({i,color:TCOL[i],len:0,t0:0,layers:[],state:'empty',muted:false,rec:null,shift:0,semi:0,open:true}));
   let primary=null, selected=0;
   const hist=[]; let histSamples=0, lastAudio=0;
 
@@ -423,7 +423,7 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
     for(let i=0;i<n;i++){ let p=(pos+i-lat)%T.len; if(p<0)p+=T.len; ch[p]=data[i]; }
     const L=addLayer(T,buf); startLayer(T,L,ctx.currentTime,posSamples(T)/sr); if(!keepDubbing) T.state='play'; refresh(); }
   function commitDub(T){ const r=T.rec; T.rec=null; commitDubData(T,r,false); }
-  function addLayer(T,buf){ const L={buf,input:ctx.createGain(),gain:ctx.createGain(),src:null,muted:false,vol:1,fx:defaultFx(),tail:null,nodes:{},open:false}; L.gain.connect(master); rebuild(T,L); T.layers.push(L); return L; }
+  function addLayer(T,buf){ const L={buf,buf0:buf,semiBase:T.semi,input:ctx.createGain(),gain:ctx.createGain(),src:null,muted:false,vol:1,fx:defaultFx(),tail:null,nodes:{},open:false}; L.gain.connect(master); rebuild(T,L); T.layers.push(L); return L; }
   function removeLayer(L){ try{L.src&&L.src.stop();}catch(e){} try{L.input.disconnect();}catch(e){} try{L.gain.disconnect();}catch(e){} }
   function stopTrack(T){ if(!ctx) return; stopSources(T);
     if(T.state==='rec'||T.state==='armed'){ T.rec=null; T.state='empty'; }
@@ -465,9 +465,21 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
   let taps=[]; $('tap').onclick=()=>{ const now=performance.now(); if(taps.length&&now-taps[taps.length-1]>2000) taps=[]; taps.push(now); if(taps.length>=2){ const iv=[]; for(let i=1;i<taps.length;i++) iv.push(taps[i]-taps[i-1]); const avg=iv.slice(-6).reduce((a,b)=>a+b,0)/Math.min(iv.length,6); $('bpm').value=Math.round(60000/avg); } };
   $('mkClick').onclick=makeClick;
 
+  // ---------- transpose: granular repitch, same length, loop-wrapped ----------
+  let hannCache=null;
+  function hann(n){ if(hannCache&&hannCache.length===n) return hannCache; const w=new Float32Array(n); for(let i=0;i<n;i++) w[i]=.5-.5*Math.cos(2*Math.PI*i/(n-1)); return hannCache=w; }
+  function pitchShiftBuf(srcBuf,semis){ const src=srcBuf.getChannelData(0),N=src.length; if(!semis){ const b=ctx.createBuffer(1,N,sr); b.getChannelData(0).set(src); return b; }
+    const ratio=Math.pow(2,semis/12),out=new Float32Array(N),grain=Math.round(sr*.09),hop=grain>>1,win=hann(grain);
+    for(let start=0;start<N;start+=hop){ for(let i=0;i<grain;i++){ const oi=start+i; if(oi>=N) break; const si=start+i*ratio,s0=Math.floor(si),fr=si-s0;
+      const a=src[((s0%N)+N)%N],b2=src[(((s0+1)%N)+N)%N]; out[oi]+=(a+(b2-a)*fr)*win[i]; } }
+    const b=ctx.createBuffer(1,N,sr); b.getChannelData(0).set(out); return b; }
+  function setTranspose(T,semi){ semi=Math.max(-12,Math.min(12,semi)); if(semi===T.semi) return; T.semi=semi;
+    for(const L of T.layers) L.buf=pitchShiftBuf(L.buf0,T.semi-L.semiBase);
+    if(T.state==='play'||T.state==='dub') startTrack(T); refresh(); }
+
   // ---------- re-timing ----------
   function commitShift(T,samples){ samples=((Math.round(samples)%T.len)+T.len)%T.len; T.shift=0; if(!samples||!T.len){ drawRings(); return; }
-    for(const L of T.layers){ const src=L.buf.getChannelData(0),nb=ctx.createBuffer(1,T.len,sr),dst=nb.getChannelData(0); for(let i=0;i<T.len;i++) dst[(i+samples)%T.len]=src[i]; L.buf=nb; }
+    for(const L of T.layers){ for(const key of (L.buf===L.buf0?['buf']:['buf','buf0'])){ const src=L[key].getChannelData(0),nb=ctx.createBuffer(1,T.len,sr),dst=nb.getChannelData(0); for(let i=0;i<T.len;i++) dst[(i+samples)%T.len]=src[i]; L[key]=nb; } if(L.buf===L.buf0) L.buf0=L.buf; }
     if(T.state==='play'||T.state==='dub') startTrack(T); refresh(); }
   function ringTrackAt(cx,cy){ const rect=headC.getBoundingClientRect(),x=(cx-rect.left)*640/rect.width-CX,y=(cy-rect.top)*640/rect.height-CX,r=Math.hypot(x,y); if(r<R_IN||r>R_OUT) return null;
     let best=null,bd=1e9; tracks.forEach((T,i)=>{ if(!T.len) return; const d=Math.abs(r-(R_IN+5+BAND*i+BAND/2)); if(d<bd){bd=d;best=T;} }); return best?{T:best,ang:Math.atan2(y,x)}:null; }
@@ -526,13 +538,14 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
   // ---------- tracks panel ----------
   function renderTracks(){ ui.tracks.innerHTML=''; let any=false;
     tracks.forEach(T=>{ if(!T.layers.length) return; any=true; const el=document.createElement('div'); el.className='trk'+(T.i===selected?' sel':''); el.dataset.t=T.i; el.style.setProperty('--c',T.color);
-      el.innerHTML=`<div class="thead"><span class="tn">${T===primary?'♛ ':''}TRACK ${T.i+1}${T.isClick?' · CLICK':(T.isClip?' · CLIP':'')}</span><span class="tl">${T.isClip?T.isClip+' · ':''}${T.isClick?T.isClick.bpm+' BPM · '+T.isClick.bars+' bars of '+T.isClick.beats+' · ':''}${fmt(T.len/sr)} ${ratioLabel(T)} · ${T.layers.length} layer${T.layers.length>1?'s':''}</span>
+      el.innerHTML=`<div class="thead"><span class="tn">${T===primary?'♛ ':''}TRACK ${T.i+1}${T.isClick?' · CLICK':(T.isClip?' · CLIP':'')}</span><span class="tl">${T.isClip?T.isClip+' · ':''}${T.isClick?T.isClick.bpm+' BPM · '+T.isClick.bars+' bars of '+T.isClick.beats+' · ':''}${fmt(T.len/sr)} ${ratioLabel(T)}${T.semi?' · '+(T.semi>0?'+':'')+T.semi+' st':''} · ${T.layers.length} layer${T.layers.length>1?'s':''}</span>
         <button class="mini tmute ${T.muted?'off':''}">${T.muted?'MUTED':'MUTE'}</button><button class="mini tstop">${T.state==='stopped'?'PLAY':'STOP'}</button><button class="mini tclear">CLEAR</button></div>
-        <div class="nudge"><span>TIME</span><button class="mini nl">◀</button><button class="mini nr">▶</button><span>±10 ms · shift-click ±1 ms · or drag the ring</span></div><div class="lyrs"></div>`;
+        <div class="nudge"><span>TIME</span><button class="mini nl">◀</button><button class="mini nr">▶</button><span>±10ms · shift ±1ms · or drag ring</span><span style="margin-left:auto">PITCH</span><button class="mini pd">−</button><b class="semi" style="color:var(--c);min-width:34px;text-align:center">${T.semi>0?'+':''}${T.semi} st</b><button class="mini pu">+</button></div><div class="lyrs"></div>`;
       el.querySelector('.tmute').onclick=()=>{ setMute(T,!T.muted); refresh(); };
       el.querySelector('.tstop').onclick=()=>{ if(T.state==='stopped') startTrack(T); else stopTrack(T); refresh(); };
       el.querySelector('.tclear').onclick=()=>clearTrack(T);
       el.querySelector('.nl').onclick=e=>commitShift(T,-(e.shiftKey?1:10)/1000*sr); el.querySelector('.nr').onclick=e=>commitShift(T,(e.shiftKey?1:10)/1000*sr);
+      el.querySelector('.pd').onclick=()=>setTranspose(T,T.semi-1); el.querySelector('.pu').onclick=()=>setTranspose(T,T.semi+1);
       el.addEventListener('pointerdown',()=>selectTrack(T.i));
       const lyrs=el.querySelector('.lyrs'); T.layers.forEach((L,i)=>lyrs.appendChild(layerRow(T,L,i))); ui.tracks.appendChild(el); });
     if(!any) ui.tracks.innerHTML='<div class="empty">no loops yet — pick a track and step on the switch</div>'; }
