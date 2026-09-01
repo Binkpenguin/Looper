@@ -125,6 +125,11 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
 .click input[type=number]{width:52px;background:#0a0710;border:1px solid #40305a;color:var(--silk);border-radius:5px;padding:4px 5px;font:inherit;font-size:11px}
 .click .csel{font:inherit;font-size:10px;background:#0a0710;color:var(--silk);border:1px solid #40305a;border-radius:5px;padding:4px}
 .click .cbtn{padding:5px 9px;font-size:10px;margin-left:auto}
+.reclen{margin-top:8px}
+.reclen .seg{background:#0a0710;border:1px solid #000;border-radius:6px;padding:2px;display:flex}
+.reclen .seg button{background:none;border:none;color:#7a7288;font:inherit;font-size:10px;letter-spacing:.08em;padding:5px 8px;border-radius:4px;cursor:pointer}
+.reclen .seg button.on{background:#3b2d55;color:#f3e9d2}
+.reclen span{flex:1;text-align:right}
 .click #tap{margin-left:0}
 .foot-note{margin-top:12px;display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--dim);flex-wrap:wrap;gap:8px;position:relative;z-index:1}
 .foot-note label{display:flex;align-items:center;gap:6px}
@@ -212,7 +217,7 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
   <i class="screw tl"></i><i class="screw tr"></i><i class="screw bl"></i><i class="screw br"></i>
   <div class="jack in"><span>IN</span></div><div class="jack out"><span>OUT</span></div><div class="dc"></div>
   <div class="head">
-    <div class="brand">PLOOPER<small>SYNC LOOP STATION · 4 TRACK · v6.3</small></div>
+    <div class="brand">PLOOPER<small>SYNC LOOP STATION · 4 TRACK · v6.4</small></div>
     <div class="master"><div class="knob big" id="masterKnob" tabindex="0" role="slider" aria-label="Master volume"><i></i></div>OUTPUT</div>
   </div>
 
@@ -246,6 +251,7 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
     <label>BARS <input type="number" id="bars" value="4" min="1" max="64"></label>
     <button class="btn cbtn on" id="mkClick">MAKE CLICK →</button>
   </div>
+  <div class="click reclen"><div class="ceye">REC LENGTH</div><div class="seg" id="recLen"></div><span id="recNote">auto-rolls into a new track every ×1 · tap closes early · hold cancels</span></div>
   <div class="tracks" id="tracks"></div>
 
   <div class="foot-note">
@@ -312,7 +318,8 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
   const TCOL=['#5ee39a','#5fd0ff','#ffc24a','#ff6ab0'];
   const CX=320,R_IN=150,R_OUT=300,BAND=(R_OUT-R_IN-12)/4;
   const FXDEF=[['dist','DRIVE'],['comp','COMP'],['delay','DELAY'],['rev','VERB']];
-  const RATIOS=[.25,.5,1,2,4,8];
+  const RATIOS=[.25,.5,1,2,4,8,16];
+  let recMult=1;
 
   let ctx,micSrc,micGain,proc,analyser,monGain,master,recBus,instMix,IR,micOk=false,micMuted=false; const bus={};
   let sr=48000,monitoring=false,masterVol=.85;
@@ -397,26 +404,31 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
     if(!primary){ T.rec.end=now; T.state='pending'; return; }
     const P=primary.len/sr; let best=null,bd=1e9; for(const r of RATIOS){ const c=P*r,d=Math.abs(Math.log(el/c)); if(d<bd){bd=d;best=c;} }
     T.rec.end=T.rec.start+best; T.rec.ratio=best/P; T.state='pending'; }
-  function checkPending(){ for(const T of tracks){ if(T.state==='pending'&&lastAudio>=T.rec.end) finalize(T); if(T.state==='dubpend'&&lastAudio>=T.rec.end) commitDub(T); } }
+  function checkPending(){ for(const T of tracks){ if(T.state==='pending'&&T.rec&&lastAudio>=T.rec.end) finalize(T);
+    while(T.pendingDubs&&T.pendingDubs.length&&lastAudio>=T.pendingDubs[0].end) commitDubData(T,T.pendingDubs.shift(),true);
+    if(T.state==='dubpend'&&T.rec&&lastAudio>=T.rec.end) commitDub(T); } }
   function finalize(T){ const {start,end}=T.rec; let data=slice(start,end); const n=data.length; if(n<sr*.1){ T.rec=null; T.state='empty'; refresh(); return; }
     if(primary){ const lat=latencySamples()%n, r=new Float32Array(n); for(let i=0;i<n;i++) r[i]=data[(i+lat)%n]; data=r; }
     T.len=n; T.t0=start; T.rec=null; const buf=ctx.createBuffer(1,n,sr); buf.copyToChannel(data,0); addLayer(T,buf); if(!primary) primary=T; startTrack(T); refresh(); }
   function startTrack(T){ stopSources(T); const when=ctx.currentTime+.01,off=((((when-T.t0)*sr)%T.len+T.len)%T.len)/sr; for(const L of T.layers) startLayer(T,L,when,off); T.state='play'; }
   function startLayer(T,L,when,off){ const s=ctx.createBufferSource(); s.buffer=L.buf; s.loop=true; s.connect(L.input); s.start(when,off); L.src=s; }
   function stopSources(T){ for(const L of T.layers){ try{L.src&&L.src.stop();}catch(e){} L.src=null; } }
-  function startDub(T){ T.rec={start:ctx.currentTime,pos:Math.floor(posSamples(T))}; T.state='dub'; }
+  function startDub(T){ T.rec={start:ctx.currentTime,pos:Math.floor(posSamples(T))}; T.pendingDubs=[]; T.state='dub'; }
+  function rollDub(T){ const end=T.rec.start+T.len/sr; (T.pendingDubs=T.pendingDubs||[]).push({start:T.rec.start,end,pos:T.rec.pos}); T.rec={start:end,pos:T.rec.pos}; }
+  function rollRec(T){ const end=T.rec.end; T.state='pending'; checkPending(); const E=tracks.find(t=>t.state==='empty'&&!t.layers.length); if(!E) return; E.rec={start:end}; E.state='rec'; selectTrack(E.i); }
   function finishDub(T){ const now=ctx.currentTime; T.rec.end=Math.min(now,T.rec.start+T.len/sr); T.state='dubpend'; checkPending(); }
-  function commitDub(T){ const {start,end,pos}=T.rec; const data=slice(start,end),buf=ctx.createBuffer(1,T.len,sr),ch=buf.getChannelData(0),n=Math.min(data.length,T.len),lat=latencySamples();
+  function commitDubData(T,{start,end,pos},keepDubbing){ const data=slice(start,end),buf=ctx.createBuffer(1,T.len,sr),ch=buf.getChannelData(0),n=Math.min(data.length,T.len),lat=latencySamples();
     for(let i=0;i<n;i++){ let p=(pos+i-lat)%T.len; if(p<0)p+=T.len; ch[p]=data[i]; }
-    T.rec=null; const L=addLayer(T,buf); startLayer(T,L,ctx.currentTime,posSamples(T)/sr); T.state='play'; refresh(); }
+    const L=addLayer(T,buf); startLayer(T,L,ctx.currentTime,posSamples(T)/sr); if(!keepDubbing) T.state='play'; refresh(); }
+  function commitDub(T){ const r=T.rec; T.rec=null; commitDubData(T,r,false); }
   function addLayer(T,buf){ const L={buf,input:ctx.createGain(),gain:ctx.createGain(),src:null,muted:false,vol:1,fx:defaultFx(),tail:null,nodes:{},open:false}; L.gain.connect(master); rebuild(T,L); T.layers.push(L); return L; }
   function removeLayer(L){ try{L.src&&L.src.stop();}catch(e){} try{L.input.disconnect();}catch(e){} try{L.gain.disconnect();}catch(e){} }
   function stopTrack(T){ if(!ctx) return; stopSources(T);
     if(T.state==='rec'||T.state==='armed'){ T.rec=null; T.state='empty'; }
-    else if(T.state==='dub'){ T.rec=null; T.state='play'; startTrack(T); }
+    else if(T.state==='dub'||T.state==='dubpend'){ T.rec=null; T.pendingDubs=[]; T.state='play'; startTrack(T); }
     else if(T.layers.length) T.state='stopped'; refresh(); }
-  function undoTrack(T){ if(T.state==='dub'){ T.rec=null; T.state='play'; refresh(); return; } if(!T.layers.length) return; removeLayer(T.layers.pop()); if(!T.layers.length) clearTrack(T); else refresh(); }
-  function clearTrack(T){ stopSources(T); T.layers.forEach(removeLayer); T.layers=[]; T.len=0; T.rec=null; T.state='empty'; T.shift=0; T.isClick=null;
+  function undoTrack(T){ if(T.state==='dub'){ T.rec={start:ctx.currentTime,pos:Math.floor(posSamples(T))}; T.pendingDubs=[]; refresh(); return; } if(!T.layers.length) return; removeLayer(T.layers.pop()); if(!T.layers.length) clearTrack(T); else refresh(); }
+  function clearTrack(T){ stopSources(T); T.layers.forEach(removeLayer); T.layers=[]; T.len=0; T.rec=null; T.pendingDubs=[]; T.state='empty'; T.shift=0; T.isClick=null;
     if(primary===T) primary=tracks.find(t=>t.layers.length)||null; refresh(); }
   function stopAll(){ tracks.forEach(stopTrack); }
   function clearAll(){ tracks.forEach(clearTrack); }
@@ -485,7 +497,7 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
     btn.addEventListener('pointerup',up); btn.addEventListener('pointercancel',()=>{ btn.classList.remove('down'); clearTimeout(timer); timer=null; });
     btn.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); pedal(tracks[selected]); } }); }
   const LED={empty:'',armed:'armed',rec:'rec',pending:'pending',play:'play',dub:'dub',dubpend:'dub',stopped:'stopped'};
-  const INFO={empty:'TAP TO ARM',armed:'WAITING FOR GRID',rec:'TAP TO CLOSE',pending:'CLOSING ON GRID',play:'TAP TO OVERDUB',dub:'TAP TO COMMIT',dubpend:'COMMITTING',stopped:'TAP TO PLAY'};
+  const INFO={empty:'TAP TO ARM',armed:'WAITING FOR GRID',rec:'ROLLING · TAP TO CLOSE',pending:'CLOSING ON GRID',play:'TAP TO OVERDUB',dub:'TAP TO COMMIT',dubpend:'COMMITTING',stopped:'TAP TO PLAY'};
   const FOOT={empty:'REC',armed:'ARMED',rec:'SET',pending:'…',play:'DUB',dub:'PLAY',dubpend:'…',stopped:'PLAY'};
   function ratioLabel(T){ if(!primary||!T.len) return ''; const r=T.len/primary.len; return r===1?'×1':r>1?'×'+Math.round(r):'÷'+Math.round(1/r); }
   function refreshFoot(){ const T=tracks[selected]; ui.fled.className='pled '+LED[T.state]; ui.ftxt.textContent=FOOT[T.state]; ui.fsub.textContent='TRACK '+(T.i+1)+' · '+INFO[T.state]; }
@@ -673,7 +685,9 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
   // ---------- frame loop ----------
   const meterBuf=new Uint8Array(512);
   function tick(){ analyser.getByteTimeDomainData(meterBuf); let peak=0; for(let i=0;i<meterBuf.length;i++) peak=Math.max(peak,Math.abs(meterBuf[i]-128)/128); ui.meter.style.width=Math.min(100,peak*140)+'%';
-    const now=ctx.currentTime; let changed=false; for(const T of tracks){ if(T.state==='armed'&&now>=T.rec.start){ T.state='rec'; changed=true; } if(T.state==='dub'&&(now-T.rec.start)*sr>=T.len){ finishDub(T); changed=true; } }
+    const now=ctx.currentTime; let changed=false; for(const T of tracks){ if(T.state==='armed'&&now>=T.rec.start){ T.state='rec'; changed=true; }
+      if(T.state==='dub'&&(now-T.rec.start)*sr>=T.len){ rollDub(T); changed=true; }
+      if(T.state==='rec'&&primary&&T!==primary&&now-T.rec.start>=primary.len/sr*recMult-.002){ T.rec.end=T.rec.start+primary.len/sr*recMult; T.rec.ratio=recMult; rollRec(T); changed=true; } }
     if(changed) refresh();
     const S=tracks[selected],cls={rec:'rec',pending:'rec',armed:'rec',play:'play',dub:'dub',dubpend:'dub'}[S.state]||'';
     const label={empty:'READY',armed:'ARMED',rec:'RECORDING',pending:'CLOSING',play:'PLAYING',dub:'OVERDUB',dubpend:'OVERDUB',stopped:'STOPPED'}[S.state];
@@ -683,6 +697,8 @@ body{margin:0;min-height:100vh;background:#0b0910 radial-gradient(ellipse at 50%
     drawHeads(); requestAnimationFrame(tick); }
 
   // ---------- wiring ----------
+  (function(){ const seg=$('recLen'),labels=[['0.25','×¼'],['0.5','×½'],['1','×1'],['2','×2'],['4','×4'],['8','×8']];
+    labels.forEach(([v,l])=>{ const b=document.createElement('button'); b.textContent=l; b.dataset.v=v; if(v==='1') b.classList.add('on'); b.onclick=()=>{ recMult=parseFloat(v); seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); $('recNote').textContent='auto-rolls into a new track every '+l+' · tap closes early · hold cancels'; }; seg.appendChild(b); }); })();
   buildSelector(); refresh();
   $('stopAll').onclick=stopAll; $('clearAll').onclick=clearAll; $('undoBtn').onclick=()=>undoTrack(tracks[selected]); $('export').onclick=exportWav;
   ui.monitor.onclick=async()=>{ if(!(await initMic())) return; monitoring=!monitoring; monGain.gain.value=monitoring?1:0; ui.monitor.textContent=monitoring?'MONITOR ON':'MONITOR OFF'; ui.monitor.classList.toggle('on',monitoring); };
